@@ -10,6 +10,7 @@ An automated setup script for integrating Proton VPN with Waybar on Arch Linux u
 
 - **One-click VPN toggle** - Left-click to connect/disconnect
 - **Server selection** - Right-click to choose different VPN servers
+- **Random VPN Mode** - Randomly select your VPN server
 - **Real-time status** - Visual indicator with connection status
 - **Passwordless operation** - No password prompts during VPN operations
 - **Desktop notifications** - Get notified of connection changes
@@ -98,8 +99,10 @@ pkill waybar && waybar &
 
 ## Usage
 
-- **Left-click** the VPN icon: Toggle VPN connection on/off
-- **Right-click** the VPN icon: Open server selection menu
+- **Left-click** the VPN icon:
+  - If specific VPN server selected: Toggle VPN connection on/off
+  - If random VPN server mode: VPN server will be changed
+- **Right-click** the VPN icon: Open settings menu
 - **Hover** over the icon: See connection status and server name
 
 ## Troubleshooting
