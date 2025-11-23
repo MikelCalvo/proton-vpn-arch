@@ -132,23 +132,43 @@ VPN_CONF="$SCRIPT_DIR/vpn.conf"
 
 # Create vpn.conf if it doesn't exist
 if [ ! -f "$VPN_CONF" ]; then
-    echo "VPN_NAME=\"\"" > "$VPN_CONF"
+    echo 'VPN_NAME=""' > "$VPN_CONF"
 fi
 
 # Source the config
+# shellcheck disable=SC1090
 source "$VPN_CONF"
 
 # Check if VPN_NAME is set and not empty
 if [ -z "$VPN_NAME" ]; then
-    echo "{\"text\": \"󰿆\", \"class\": \"inactive\", \"tooltip\": \"No VPN configured\"}"
+    echo '{"text": "󰿆", "class": "inactive", "tooltip": "No VPN configured"}'
     exit 0
 fi
 
-# Check VPN status
-if ip link show | grep -q "$VPN_NAME" 2>/dev/null; then
+# Helper to list active WireGuard interfaces
+get_active_wg_ifaces() {
+    ip -o link show 2>/dev/null | \
+        grep -oE '^[0-9]+: wg[0-9A-Za-z_-]*' | \
+        awk '{print $2}'
+}
+
+# RANDOM mode: consider connected if any WireGuard interface is up
+if [ "$VPN_NAME" = "RANDOM" ]; then
+    ACTIVE_WG_IFS=$(get_active_wg_ifaces)
+    if [ -n "$ACTIVE_WG_IFS" ]; then
+        IF_LIST=$(echo "$ACTIVE_WG_IFS" | tr '\n' ' ' | sed 's/ $//')
+        echo "{\"text\": \"󰖂\", \"class\": \"active\", \"tooltip\": \"VPN Connected (random): $IF_LIST\"}"
+    else
+        echo '{"text": "󰖂", "class": "inactive", "tooltip": "VPN Disconnected (random mode)"}'
+    fi
+    exit 0
+fi
+
+# Normal mode: check specific interface
+if ip link show 2>/dev/null | grep -qE "^[0-9]+: $VPN_NAME:"; then
     echo "{\"text\": \"󰖂\", \"class\": \"active\", \"tooltip\": \"VPN Connected: $VPN_NAME\"}"
 else
-    echo "{\"text\": \"󰖂\", \"class\": \"inactive\", \"tooltip\": \"VPN Disconnected\"}"
+    echo '{"text": "󰖂", "class": "inactive", "tooltip": "VPN Disconnected"}'
 fi
 EOF
     
@@ -162,7 +182,7 @@ VPN_CONF="$SCRIPT_DIR/vpn.conf"
 
 # Create vpn.conf if it doesn't exist
 if [ ! -f "$VPN_CONF" ]; then
-    echo "VPN_NAME=\"\"" > "$VPN_CONF"
+    echo 'VPN_NAME=""' > "$VPN_CONF"
     # Try to auto-configure with first available VPN
     configs_path="/etc/wireguard"
     if [ -d "$configs_path" ]; then
@@ -174,6 +194,7 @@ if [ ! -f "$VPN_CONF" ]; then
 fi
 
 # Source the config
+# shellcheck disable=SC1090
 source "$VPN_CONF"
 
 # Check if VPN_NAME is set
@@ -182,8 +203,35 @@ if [ -z "$VPN_NAME" ]; then
     exit 1
 fi
 
+# Helper to pick a random VPN config from /etc/wireguard
+pick_random_vpn() {
+    local configs_path="/etc/wireguard"
+    local cfgs=()
+    while IFS= read -r -d '' conf_file; do
+        [ -n "$conf_file" ] || continue
+        cfgs+=("$(basename "$conf_file" .conf)")
+    done < <(sudo find "$configs_path" -maxdepth 1 -name "*.conf" -type f -print0 2>/dev/null)
+    if [ ${#cfgs[@]} -eq 0 ]; then
+        echo ""
+        return
+    fi
+    local idx=$(( RANDOM % ${#cfgs[@]} ))
+    echo "${cfgs[$idx]}"
+}
+
+# Helper to disconnect all known VPN configs (best-effort)
+disconnect_all_vpns() {
+    local configs_path="/etc/wireguard"
+
+    while IFS= read -r -d '' conf_file; do
+        [ -n "$conf_file" ] || continue
+        cfg_name="$(basename "$conf_file" .conf)"
+        sudo wg-quick down "$cfg_name" >/dev/null 2>&1 || true
+    done < <(sudo find "$configs_path" -maxdepth 1 -name "*.conf" -type f -print0 2>/dev/null)
+}
+
 # Toggle VPN
-if ip link show | grep -q "$VPN_NAME" 2>/dev/null; then
+if ip link show 2>/dev/null | grep -qE "^[0-9]+: $VPN_NAME:"; then
     # VPN is connected, disconnect it
     if timeout 2 env SUDO_ASKPASS=/bin/false sudo -A -n wg-quick down "$VPN_NAME" 2>/dev/null; then
         notify-send "VPN Disconnected" "Disconnected from $VPN_NAME"
@@ -194,12 +242,27 @@ if ip link show | grep -q "$VPN_NAME" 2>/dev/null; then
     fi
 else
     # VPN is disconnected, connect it
-    if timeout 2 env SUDO_ASKPASS=/bin/false sudo -A -n wg-quick up "$VPN_NAME" 2>/dev/null; then
-        notify-send "VPN Connected" "Connected to $VPN_NAME"
-    elif timeout 2 sudo -n wg-quick up "$VPN_NAME" 2>/dev/null; then
-        notify-send "VPN Connected" "Connected to $VPN_NAME"
+    TARGET_VPN="$VPN_NAME"
+    
+    # Always disconnect all known VPNs before connecting a new one
+    disconnect_all_vpns
+    
+    if [ "$VPN_NAME" = "RANDOM" ]; then
+        TARGET_VPN="$(pick_random_vpn)"
+
+        if [ -z "$TARGET_VPN" ]; then
+            notify-send "VPN Error" "No VPN configurations available for RANDOM mode."
+            exit 1
+        fi
+        # Do not overwrite vpn.conf here: stay in RANDOM mode
+    fi
+    
+    if timeout 2 env SUDO_ASKPASS=/bin/false sudo -A -n wg-quick up "$TARGET_VPN" 2>/dev/null; then
+        notify-send "VPN Connected" "Connected to $TARGET_VPN"
+    elif timeout 2 sudo -n wg-quick up "$TARGET_VPN" 2>/dev/null; then
+        notify-send "VPN Connected" "Connected to $TARGET_VPN"
     else
-        notify-send "VPN Error" "Failed to connect to $VPN_NAME"
+        notify-send "VPN Error" "Failed to connect to $TARGET_VPN"
     fi
 fi
 
@@ -252,6 +315,7 @@ fi
 # Get current VPN name if exists
 current_vpn=""
 if [ -f "$VPN_CONF" ]; then
+    # shellcheck disable=SC1090
     source "$VPN_CONF"
     current_vpn="$VPN_NAME"
 fi
@@ -261,58 +325,69 @@ echo "Current VPN: ${current_vpn:-"None"}"
 echo ""
 echo "Available VPN configurations:"
 echo "0) Disconnect current VPN (if any)"
+echo "1) RANDOM VPN"
 
 for i in "${!configs[@]}"; do
-    echo "$((i+1))) ${configs[i]}"
+    echo "$((i+2))) ${configs[i]}"
 done
 
 echo ""
-read -p "Select option (0-${#configs[@]}): " choice
+max_option=$(( ${#configs[@]} + 1 ))
+read -p "Select option (0-$max_option): " choice
 
-# Handle disconnect option
+# Handle disconnect option (best-effort: down all known configs)
 if [ "$choice" = "0" ]; then
-    if [ -n "$current_vpn" ] && ip link show | grep -q "$current_vpn" 2>/dev/null; then
-        echo "Disconnecting from $current_vpn..."
-        if sudo wg-quick down "$current_vpn"; then
-            echo "Successfully disconnected from $current_vpn"
-        else
-            echo "Failed to disconnect from $current_vpn"
-        fi
-    else
-        echo "No VPN currently connected"
-    fi
+    echo "Disconnecting all known VPNs..."
+    for cfg in "${configs[@]}"; do
+        sudo wg-quick down "$cfg" >/dev/null 2>&1 || true
+    done
+    echo "Done."
     read -p "Press Enter to continue..."
     exit 0
 fi
+selected_vpn=""
 
-# Validate selection
-if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#configs[@]}" ]; then
-    selected_vpn="${configs[$((choice-1))]}"
+# Handle RANDOM option
+if [ "$choice" = "1" ]; then
+    selected_vpn="RANDOM"
+    echo 'VPN_NAME="RANDOM"' > "$VPN_CONF"
+    echo "VPN configuration set to RANDOM"
+# Validate selection for concrete profiles
+elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 2 ] && [ "$choice" -le "$max_option" ]; then
+    config_index=$((choice - 2))
+    selected_vpn="${configs[$config_index]}"
     
     # Update vpn.conf
     echo "VPN_NAME=\"$selected_vpn\"" > "$VPN_CONF"
     echo "VPN configuration updated to $selected_vpn"
-    
-    # If a VPN is currently connected, disconnect it
-    if [ -n "$current_vpn" ] && ip link show | grep -q "$current_vpn" 2>/dev/null; then
-        echo "Disconnecting from $current_vpn..."
-        sudo wg-quick down "$current_vpn"
-    fi
-    
-    # Connect to the new VPN
-    echo "Connecting to $selected_vpn..."
-    if sudo wg-quick up "$selected_vpn"; then
-        echo "Successfully connected to $selected_vpn"
-    else
-        echo "Failed to connect to $selected_vpn"
-    fi
-    
-    read -p "Press Enter to continue..."
 else
     echo "Invalid selection."
     read -p "Press Enter to continue..."
     exit 1
 fi
+
+# Best-effort: disconnect all known VPNs before connecting a new one
+echo "Disconnecting all known VPNs before connecting new one..."
+for cfg in "${configs[@]}"; do
+    sudo wg-quick down "$cfg" >/dev/null 2>&1 || true
+done
+
+# If RANDOM is selected, let toggle-vpn.sh handle connection
+if [ "$selected_vpn" = "RANDOM" ]; then
+    echo "Random mode enabled. Use the toggle script to connect."
+    read -p "Press Enter to continue..."
+    exit 0
+fi
+
+# Connect to the new VPN
+echo "Connecting to $selected_vpn..."
+if sudo wg-quick up "$selected_vpn"; then
+    echo "Successfully connected to $selected_vpn"
+else
+    echo "Failed to connect to $selected_vpn"
+fi
+
+read -p "Press Enter to continue..."
 EOF
     
     # Make scripts executable
